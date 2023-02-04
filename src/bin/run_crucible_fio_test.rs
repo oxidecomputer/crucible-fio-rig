@@ -7,43 +7,46 @@ use crucible_fio_rig::fio_rig_protocol::{
 };
 use futures::prelude::*;
 use std::{
-    collections::{BTreeMap, VecDeque},
-    fmt::format,
+    collections::VecDeque,
     fs::File,
     io::{BufRead, BufReader, ErrorKind, Read, Write},
     os::unix::net::UnixStream,
     path::Path,
     process::{Child, Command, Stdio},
     str::FromStr,
-    sync::{mpsc, Arc},
-    thread,
+    sync::mpsc,
+    thread::{self, sleep},
     time::{Duration, Instant},
 };
 use tempfile;
 use tokio_serde::formats::MessagePack;
 use tokio_util::codec::LengthDelimitedCodec;
-use toml_edit::{value, Document, Item, Value};
+use toml_edit::{value, Document};
 
 // hashes here are blake3, generate with b3sum from `cargo install b3sum`
 const BOOTROM_DOWNLOAD_URL: &str =
     "https://oxide-omicron-build.s3.amazonaws.com/OVMF_CODE_20220922.fd";
 const BOOTROM_HASH: &str = "fbeb0d100f8e8bbe12c558806c1ad0d8a88abf7a818eb04ef92498d61d31e2a4";
 const BOOTROM_FILENAME: &str = "OVMF_CODE.fd";
+
 const ISO_DOWNLOAD_URL: &str = "http://172.16.254.64:8099/f/fio-rig.iso";
-const ISO_HASH: &str = "f653b7fe44a4438d705f51b8c98939c558040e8baf924c4bace579ca763db935";
+const ISO_HASH: &str = "155ee5e6e4c4a69e0b7906372b244f95085e15a6e6d2c58c6ef078d3fe2c6f39";
 const ISO_FILENAME: &str = "fio-rig.iso";
 
-// TODO check that this is writable
+/// bootrom and iso will be stored here.
 const CACHE_DIR: &str = "/var/cache/crucible-propolis-fio-test";
 
 #[derive(FromArgs, PartialEq, Debug)]
-/// Build propolis with a given commit hash of crucible, and run some fio tests in a VM on it.
+/// Build propolis with a given commit hash of crucible, and run some fio
+/// tests in a VM on it. Output is printed to stdout or written to a
+/// specified output file
 struct RunCrucibleFioTestCmd {
     #[argh(
         option,
         default = "String::from(\"https://github.com/oxidecomputer/crucible.git\")"
     )]
-    /// repo url of crucible to use for upstairs/downstairs, defaults to github oxidecomputer/crucible
+    /// repo url of crucible to use for upstairs/downstairs, defaults to
+    /// github oxidecomputer/crucible
     crucible_url: String,
 
     #[argh(option)]
@@ -54,12 +57,26 @@ struct RunCrucibleFioTestCmd {
         option,
         default = "String::from(\"https://github.com/oxidecomputer/propolis.git\")"
     )]
-    /// repo url of propolis to use for upstairs/downstairs, defaults to github oxidecomputer/propolis
+    /// repo url of propolis to use for upstairs/downstairs, defaults to
+    /// github oxidecomputer/propolis
     propolis_url: String,
 
     #[argh(option)]
     /// commit hash, branch, or tag of propolis to check out
     propolis_commit: String,
+
+    #[argh(option, default = "String::from(\"normal\")")]
+    ///fio output format, see fio help for more details. When normal or terse,
+    ///output will be formatted as the fio test path, the fio test
+    ///result/error, and then a few newlines. With json or json+, output will
+    ///be syntactically correct json.
+    output_format: String,
+
+    #[argh(option, default = "String::from(\"-\")")]
+    /// if specified, output will be written to to this file. Otherwise,
+    /// output will be written to STDOUT. Specifying `-` will also send
+    /// output to STDOUT.
+    output_file: String,
 
     #[argh(positional)]
     /// fio job files on disk that should be sent to the VM to execute.
@@ -68,15 +85,65 @@ struct RunCrucibleFioTestCmd {
 
 pub fn main() -> Result<()> {
     let cmd: RunCrucibleFioTestCmd = argh::from_env();
-    run_crucible_fio_tests(
+
+    // Read all the job files
+    let mut fio_jobs = Vec::with_capacity(cmd.fio_jobs.len());
+    for (job_id, path) in cmd.fio_jobs.into_iter().enumerate() {
+        let mut job_file = File::open(&path)?;
+        let mut job_bytes = Vec::new();
+        job_file.read_to_end(&mut job_bytes)?;
+        let job_contents = String::from_utf8(job_bytes)?;
+        fio_jobs.push(FioTestDefinition {
+            id: job_id as u64,
+            name: path,
+            fio_job: job_contents,
+            fio_args: Vec::new(), // TODO
+        });
+    }
+
+    let fio_results = run_crucible_fio_tests(
         &cmd.crucible_url,
         &cmd.crucible_commit,
         &cmd.propolis_url,
         &cmd.propolis_commit,
-        &cmd.fio_jobs,
-    )
-    // NOTE move reading the jobs into here. move writing the jobs somewhere
-    // else into here. pass in FioTestDefinition to run_crucible_fio_tests
+        fio_jobs,
+    )?;
+
+    let mut results_output: Box<dyn Write> = if cmd.output_file == "-" {
+        Box::new(std::io::stdout())
+    } else {
+        Box::new(File::create(cmd.output_file)?)
+    };
+
+    if cmd.output_format.contains("json") {
+        // TODO
+    } else {
+        for result in fio_results {
+            match result {
+                Ok(result) => {
+                    write!(
+                        results_output,
+                        "Results for test {} - {}\n",
+                        result.id, result.name
+                    )?;
+                    results_output.write_all(result.results.as_bytes())?;
+                }
+                Err(err) => {
+                    write!(
+                        results_output,
+                        "Test failure for test {} - {}\n",
+                        err.id, err.name
+                    )?;
+                    results_output.write_all(err.err.as_bytes())?
+                }
+            }
+            write!(results_output, "\n\n\n")?;
+        }
+    }
+
+    results_output.flush()?;
+
+    Ok(())
 }
 
 pub fn run_crucible_fio_tests(
@@ -84,18 +151,19 @@ pub fn run_crucible_fio_tests(
     crucible_gitref: &str,
     propolis_url: &str,
     propolis_gitref: &str,
-    fio_jobs: &[String],
-) -> Result<()> {
-    // work dir in tmpfs
-    let work_dir = tempfile::tempdir()?;
+    fio_jobs: Vec<FioTestDefinition>,
+) -> Result<Vec<Result<FioTestResult, FioTestErr>>> {
+    if !Utf8PathBuf::from_str("/dev/vmm").unwrap().try_exists()? {
+        bail!("/dev/vmm doesn't exist - is bhyve installed?");
+    }
 
     // create cache dir
     std::fs::create_dir_all(CACHE_DIR)?;
 
+    // work dir in tmp
+    let work_dir = tempfile::tempdir()?;
     let work_dir_path = Utf8Path::from_path(work_dir.path())
         .unwrap_or_else(|| panic!("tfw your filepath isn't valid UTF-8: {:?}", work_dir.path()));
-
-    // TODO check for bhyve
 
     let crucible_dir = work_dir_path.join("crucible");
     let propolis_dir = work_dir_path.join("propolis");
@@ -155,20 +223,28 @@ pub fn run_crucible_fio_tests(
     ensure!(propolis_exe.exists());
 
     // Run a VM with propolis-standalone
-    let vm_name = generate_vm_name()?;
-    let (propolis_proc, vm_serial) =
+    let vm_name = generate_vm_name();
+    let (mut propolis_proc, vm_serial) =
         launch_fio_test_vm(&vm_name, 2, 2048, &propolis_exe, &work_dir_path)?;
 
-    // Connect in with some kind of serial attach thingy
-    // copy sercons
-
     // Run fio tests
-    let fio_job_paths: Vec<_> = fio_jobs.iter().map(Utf8PathBuf::from).collect();
-    let fio_results = run_fio_tests_on_rig(&fio_job_paths, vm_serial)?;
+    let fio_results = run_fio_tests_on_rig(fio_jobs, vm_serial)?;
 
-    destroy_bhyve_vm(&vm_name)?;
+    // Close down propolis process
+    let _ = propolis_proc.kill();
+    // Wait up to 10 seconds, then move on with our life
+    for _ in 0..10 {
+        if let Ok(Some(_)) = propolis_proc.try_wait() {
+            break;
+        }
+        sleep(Duration::from_secs(1));
+    }
 
-    Ok(())
+    // Clean up the VM resources. Ignore failure because ultimately we just
+    // want to bubble up the results, this is best effort.
+    let _ = destroy_bhyve_vm(&vm_name)?;
+
+    Ok(fio_results)
 }
 
 fn clone_and_checkout<P: AsRef<Path>>(url: &str, gitref: &str, path: &P) -> Result<()> {
@@ -245,19 +321,19 @@ fn download_bootrom_if_needed() -> Result<Utf8PathBuf> {
 fn download_fio_test_iso_if_needed() -> Result<Utf8PathBuf> {
     let path = Utf8PathBuf::from(CACHE_DIR).join(ISO_FILENAME);
     let expected_hash = blake3::Hash::from_hex(ISO_HASH).unwrap();
-    download_if_needed(&path, ISO_DOWNLOAD_URL, expected_hash).context("Downloading bootrom")?;
+    download_if_needed(&path, ISO_DOWNLOAD_URL, expected_hash).context("Downloading iso")?;
     Ok(path)
 }
 
 /// generate an unused VM name. This just looks in /dev/vmm to find existing VMs
-fn generate_vm_name() -> Result<String> {
+fn generate_vm_name() -> String {
     let dev_vmm = Utf8PathBuf::from_str("/dev/vmm").unwrap();
 
     // This pool doesn't need to be big, it's just for fun. The number we throw
     // on the end is the main thing preventing colissions.
     const DIVINES: [&str; 12] = [
         "DISCOVERY",
-        "DISINTEREST",
+        "DETACHMENT",
         "EMPATHY",
         "GRACE",
         "INTEGRITY",
@@ -271,15 +347,16 @@ fn generate_vm_name() -> Result<String> {
     ];
 
     let divine: &str = DIVINES[rand::random::<usize>() % DIVINES.len()];
-    let suffix: u128 = rand::random();
+    let suffix: u32 = rand::random();
     let vm_name = format!("{}{}", divine, suffix);
     let vm_path = dev_vmm.join(&vm_name);
     if vm_path.exists() {
         // normal recursion is fine, chances of colliding even a single time is
         // slim, much less multiple times.
-        return generate_vm_name();
+        generate_vm_name()
+    } else {
+        vm_name
     }
-    Ok(vm_name)
 }
 
 /// Launch a VM with a given name and ISO path. Returns the child process and a
@@ -310,6 +387,12 @@ fn launch_fio_test_vm(
     driver = "pci-nvme"
     block_dev = "test_disk"
     pci-path = "0.5.0"
+
+    # TODO delete this later when we have it working
+    [dev.net0]
+    driver = "pci-virtio-viona"
+    vnic = "vnic_prop0"
+    pci-path = "0.6.0"
     "#;
     let mut vm_config = base_config_toml.parse::<Document>().unwrap();
     let bootrom_path = download_bootrom_if_needed()?;
@@ -400,24 +483,9 @@ fn destroy_bhyve_vm(vm_name: &str) -> Result<()> {
 }
 
 fn run_fio_tests_on_rig(
-    fio_job_paths: &[Utf8PathBuf],
+    fio_jobs: Vec<FioTestDefinition>,
     mut rig_serial: UnixStream,
 ) -> Result<Vec<Result<FioTestResult, FioTestErr>>> {
-    // Read all the job files
-    let mut fio_jobs = Vec::with_capacity(fio_job_paths.len());
-    for (job_id, path) in fio_job_paths.iter().enumerate() {
-        let mut job_file = File::open(path)?;
-        let mut job_bytes = Vec::new();
-        job_file.read_to_end(&mut job_bytes)?;
-        let job_contents = String::from_utf8(job_bytes)?;
-        fio_jobs.push(FioTestDefinition {
-            id: job_id as u64,
-            name: path.to_string(),
-            fio_job: job_contents,
-            fio_args: Vec::new(), // TODO
-        });
-    }
-
     // Wait for complete alignment sequence. We need this to skip over any
     // bootloader crud before the other end starts running.
     {
@@ -450,7 +518,7 @@ fn run_fio_tests_on_rig(
                 Ok(_) => unreachable!(),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => (), // read timeout, which is fine
                 Err(e) if e.kind() == ErrorKind::Interrupted => (), // interrupted, which is fine
-                Err(e) => bail!(e),                                // some unexpected error
+                Err(e) => bail!(e), // some unexpected error
             }
 
             // Do timeout check... I dunno, 5 minutes seems like a reasonable
@@ -471,7 +539,6 @@ fn run_fio_tests_on_rig(
     let fio_results = tokio_rt.block_on(async move {
         // Make the serial connection async
         let serial_io = tokio::net::UnixStream::from_std(rig_serial)?;
-
 
         // Set up the framed serial connection
         let ser_delimited = tokio_util::codec::Framed::new(serial_io, LengthDelimitedCodec::new());
@@ -503,9 +570,9 @@ fn run_fio_tests_on_rig(
             };
 
             match req? {
-                FioRigResponse::FioTestErr(err) => fio_results.push(Err(err)),
-                FioRigResponse::OtherErr(err) => bail!(err), /* something went wrong on the server, but not in a test */
                 FioRigResponse::FioTestResult(result) => fio_results.push(Ok(result)),
+                FioRigResponse::FioTestErr(err) => fio_results.push(Err(err)),
+                FioRigResponse::OtherErr(err) => bail!(err), // something went wrong on the server, but not in a test
                 FioRigResponse::ShuttingDown => break,
             }
         }
@@ -514,8 +581,8 @@ fn run_fio_tests_on_rig(
         result
     })?;
 
-    // Wait around for things to clean up but we should be good to go at this
-    // point.
+    // Wait around for things to clean up, but if they don't we don't really
+    // care.
     tokio_rt.shutdown_timeout(Duration::from_secs(10));
 
     Ok(fio_results)

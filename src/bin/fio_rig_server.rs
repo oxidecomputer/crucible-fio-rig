@@ -94,7 +94,7 @@ async fn run_fio_test(test_def: &FioTestDefinition) -> Result<FioTestResult> {
 
     // Run fio
     let fio_output = Command::new("fio")
-        .arg("--filename=") // TODO IO device
+        .arg("--filename=/dev/nvme0n1")
         .arg(&format!("--output={}", fio_output_path))
         .args(&test_def.fio_args)
         .arg(&fio_job_path)
