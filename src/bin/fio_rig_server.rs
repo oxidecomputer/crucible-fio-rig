@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use crucible_fio_rig::fio_rig_protocol::{
-    FioRigRequest, FioRigResponse, FioTestDefinition, FioTestErr, FioTestResult,
+    FioRigRequest, FioRigResponse, FioTestDefinition, FioTestErr, FioTestResult, ALIGNMENT_SEQUENCE,
 };
 use camino::Utf8Path;
 use futures::prelude::*;
@@ -30,8 +30,13 @@ async fn main() -> Result<()> {
 
 async fn main_loop() -> Result<()> {
     // Attach to TTY
-    let ser = SerialStream::open(&tokio_serial::new("/dev/ttyS0", 1500000))
+    let mut ser = SerialStream::open(&tokio_serial::new("/dev/ttyS0", 1500000))
         .expect("Failed to open serial port");
+
+    // Before setting up our framed codec, write an alignment sequence so the
+    // other end knows we're in charge of the serial port now.
+    ser.write_all(ALIGNMENT_SEQUENCE).await?;
+    
     let ser_delimited = tokio_util::codec::Framed::new(ser, LengthDelimitedCodec::new());
     let fio_rig_codec = MessagePack::<FioRigRequest, FioRigResponse>::default();
     let mut conn = tokio_serde::Framed::<_, FioRigRequest, FioRigResponse, _>::new(
@@ -46,7 +51,11 @@ async fn main_loop() -> Result<()> {
         };
 
         match req? {
-            FioRigRequest::Stop => break,
+            FioRigRequest::Stop => {
+                // Confirm that we're shutting down
+                conn.feed(FioRigResponse::ShuttingDown).await?;
+                break
+            },
             FioRigRequest::FioTest(test_def) => {
                 let result = run_fio_test(&test_def).await;
                 let response = match result {
@@ -78,7 +87,7 @@ async fn run_fio_test(test_def: &FioTestDefinition) -> Result<FioTestResult> {
     {
         let mut job_file = File::create(&fio_job_path).await?;
         job_file
-            .write_all(test_def.fio_file_contents.as_bytes())
+            .write_all(test_def.fio_job.as_bytes())
             .await?;
         job_file.shutdown().await?;
     }

@@ -1,4 +1,8 @@
+use std::{fmt, error::Error};
+
 use serde::{Serialize, Deserialize};
+
+pub const ALIGNMENT_SEQUENCE: &[u8] = "=== ALIGNTMENT SEQUENCE - ALL SYSTEMS: NOMINAL ===".as_bytes();
 
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FioTestDefinition {
@@ -9,7 +13,7 @@ pub struct FioTestDefinition {
     pub name: String,
     
     /// Contents of a fio file for the test
-    pub fio_file_contents: String,
+    pub fio_job: String,
 
     /// Any extra args to be given directly to the fio command
     pub fio_args: Vec<String>
@@ -48,6 +52,14 @@ pub enum FioRigRequest {
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FioRigResponse {
     FioTestResult(FioTestResult),
+    ShuttingDown,
     FioTestErr(FioTestErr),
     OtherErr(String)
 }
+
+impl fmt::Display for FioTestErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Error running FIO test {}-{}: {}", self.id, self.name, self.err)
+    }
+}
+impl Error for FioTestErr {}
