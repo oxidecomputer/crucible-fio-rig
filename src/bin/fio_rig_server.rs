@@ -30,12 +30,14 @@ async fn main() -> Result<()> {
 
 async fn main_loop() -> Result<()> {
     // Attach to TTY
-    let mut ser = SerialStream::open(&tokio_serial::new("/dev/ttyS0", 1500000))
+    let mut ser = SerialStream::open(&tokio_serial::new("/dev/ttyS0", 115200))
         .expect("Failed to open serial port");
 
+    eprintln!("Writing alignment sequence.");
     // Before setting up our framed codec, write an alignment sequence so the
     // other end knows we're in charge of the serial port now.
     ser.write_all(ALIGNMENT_SEQUENCE).await?;
+    ser.flush().await?;
     
     let ser_delimited = tokio_util::codec::Framed::new(ser, LengthDelimitedCodec::new());
     let fio_rig_codec = MessagePack::<FioRigRequest, FioRigResponse>::default();
@@ -45,18 +47,22 @@ async fn main_loop() -> Result<()> {
     );
 
     // Process requests until it's time to shut down
+    eprintln!("Entering main loop");
     loop {
         let Some(req) = conn.next().await else {
             break;
         };
+        eprintln!("Received a request: {:?}", req);
 
         match req? {
             FioRigRequest::Stop => {
                 // Confirm that we're shutting down
-                conn.feed(FioRigResponse::ShuttingDown).await?;
+                eprintln!("Shutting down");
+                conn.send(FioRigResponse::ShuttingDown).await?;
                 break
             },
             FioRigRequest::FioTest(test_def) => {
+                eprintln!("Running test.");
                 let result = run_fio_test(&test_def).await;
                 let response = match result {
                     Ok(result) => FioRigResponse::FioTestResult(result),
@@ -66,11 +72,13 @@ async fn main_loop() -> Result<()> {
                         err: err.to_string(),
                     }),
                 };
-                conn.feed(response).await?;
+                eprintln!("Sending test results.");
+                conn.send(response).await?;
             }
         }
     }
 
+    eprintln!("Closing connection");
     conn.close().await?;
 
     Ok(())
@@ -84,6 +92,7 @@ async fn run_fio_test(test_def: &FioTestDefinition) -> Result<FioTestResult> {
     let fio_output_path = fio_workdir_path.join("fio_output");
 
     // Write the jobfile
+    eprintln!("Writing jobfile.");
     {
         let mut job_file = File::create(&fio_job_path).await?;
         job_file
@@ -93,6 +102,9 @@ async fn run_fio_test(test_def: &FioTestDefinition) -> Result<FioTestResult> {
     }
 
     // Run fio
+    eprintln!("Running FIO test.");
+    eprintln!("Input: {}\nOutput: {}", fio_job_path, fio_output_path);
+    eprintln!("Request: {:?}", test_def);
     let fio_output = Command::new("fio")
         .arg("--filename=/dev/nvme0n1")
         .arg(&format!("--output={}", fio_output_path))
@@ -105,6 +117,7 @@ async fn run_fio_test(test_def: &FioTestDefinition) -> Result<FioTestResult> {
         .wait_with_output()
         .await?;
 
+    eprintln!("FIO test done.");
     if !fio_output.status.success() {
         bail!(
             "Fio exited with error code {:?}, here's the output:\n{}",
@@ -114,6 +127,7 @@ async fn run_fio_test(test_def: &FioTestDefinition) -> Result<FioTestResult> {
     }
 
     // Read the output file
+    eprintln!("Reading FIO output.");
     let mut output_file = File::open(fio_output_path).await?;
     let mut results = String::new();
     output_file.read_to_string(&mut results).await?;

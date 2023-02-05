@@ -20,11 +20,11 @@ let
       '';
     }) { };
 in {
-  environment.systemPackages = [ pkgs.fio ];
   systemd.services.fioRig = {
     description = "Run the fio rig server component";
     wantedBy = [ "multi-user.target" ];
     serviceConfig.ExecStart = "${crucibleFioRig}/bin/fio_rig_server";
+    path = [ pkgs.fio ];
   };
   # TODO take these out when we're done debugging.
   services.openssh.enable = true;
@@ -37,4 +37,5 @@ in {
     # comms
     "console=ttyS1"
   ];
+  isoImage.squashfsCompression = "zstd -Xcompression-level 3";
 }

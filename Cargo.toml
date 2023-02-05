@@ -27,8 +27,8 @@ toml_edit = "0.18"  # this needs to match whatever cargo-edit is using.
 tokio-serial = { version = "5.4.4", features = ["codec", "libudev", "tokio-util", "rt"] }
 
 # condition fio_rig_server on tokio-serial getting pulled in so that it
-# doesn't build on illumos this binary is the half that runs on the linux
-# VM.
+# doesn't build on illumos. this binary is the half that runs on the
+# linux VM.
 [[bin]]
 name = "fio_rig_server"
 required-features = ["tokio-serial/codec"]

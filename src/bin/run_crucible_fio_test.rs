@@ -30,7 +30,7 @@ const BOOTROM_HASH: &str = "fbeb0d100f8e8bbe12c558806c1ad0d8a88abf7a818eb04ef924
 const BOOTROM_FILENAME: &str = "OVMF_CODE.fd";
 
 const ISO_DOWNLOAD_URL: &str = "http://172.16.254.64:8099/f/fio-rig.iso";
-const ISO_HASH: &str = "155ee5e6e4c4a69e0b7906372b244f95085e15a6e6d2c58c6ef078d3fe2c6f39";
+const ISO_HASH: &str = "2e0dd54003248e1761d34f5038919fac32541e9371010185349ac6919b90f8f6";
 const ISO_FILENAME: &str = "fio-rig.iso";
 
 /// bootrom and iso will be stored here.
@@ -85,6 +85,10 @@ struct RunCrucibleFioTestCmd {
 
 pub fn main() -> Result<()> {
     let cmd: RunCrucibleFioTestCmd = argh::from_env();
+
+    if cmd.fio_jobs.is_empty() {
+        bail!("no fio jobs specified");
+    }
 
     // Read all the job files
     let mut fio_jobs = Vec::with_capacity(cmd.fio_jobs.len());
@@ -242,7 +246,7 @@ pub fn run_crucible_fio_tests(
 
     // Clean up the VM resources. Ignore failure because ultimately we just
     // want to bubble up the results, this is best effort.
-    let _ = destroy_bhyve_vm(&vm_name)?;
+    let _ = destroy_bhyve_vm(&vm_name);
 
     Ok(fio_results)
 }
@@ -473,6 +477,12 @@ fn launch_fio_test_vm(
 }
 
 fn destroy_bhyve_vm(vm_name: &str) -> Result<()> {
+    // Check that file exists before trying to destroy it. If it doesn't the
+    // VM is already gone.
+    if !Utf8PathBuf::from_str("/dev/vmm").unwrap().join(vm_name).exists() {
+        return Ok(());
+    }
+
     let exit = Command::new("bhyvectl")
         .arg(&format!("--vm={}", vm_name))
         .arg("--destroy")
@@ -508,6 +518,8 @@ fn run_fio_tests_on_rig(
 
         // Until we've read the alignment sequence, read one byte at a time.
         while !scanning_buffer.iter().eq(ALIGNMENT_SEQUENCE.iter()) {
+            eprintln!("Current alignment buffer holds: {:?}", scanning_buffer);
+
             let mut byte = [0u8; 1];
             match rig_serial.read(&mut byte) {
                 Ok(0) => bail!("Serial stream ended before alignment sequence was found."),
@@ -531,10 +543,12 @@ fn run_fio_tests_on_rig(
         }
 
         // Alignment completed succesfully!
+        eprintln!("Aligned with VM");
     }
 
     // Run the actual tests. Honestly I don't even feel like using tokio here,
     // but Framed is written around an async runtime
+    eprintln!("Launching communications with VM");
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let fio_results = tokio_rt.block_on(async move {
         // Make the serial connection async
@@ -554,21 +568,25 @@ fn run_fio_tests_on_rig(
         // I'll send off one task to send stuff, and then read stuff in the main
         // task until the socket shuts down.
         tokio::spawn(async move {
+            eprintln!("Entering send loop");
             for test in fio_jobs {
-                conn_write.feed(FioRigRequest::FioTest(test)).await?;
+                eprintln!("Sending a test: {}", test.name);
+                conn_write.send(FioRigRequest::FioTest(test)).await?;
             }
-            conn_write.flush().await?;
+            // conn_write.send(FioRigRequest::Stop).await?;
             let result: Result<_> = Ok(());
             result
         });
 
         // We'll dump all the fio responses in here
+        eprintln!("Entering receive loop");
         let mut fio_results = Vec::new();
         loop {
             let Some(req) = conn_read.next().await else {
                 break;
             };
 
+            eprintln!("Received some data: {:?}", req);
             match req? {
                 FioRigResponse::FioTestResult(result) => fio_results.push(Ok(result)),
                 FioRigResponse::FioTestErr(err) => fio_results.push(Err(err)),
@@ -583,6 +601,7 @@ fn run_fio_tests_on_rig(
 
     // Wait around for things to clean up, but if they don't we don't really
     // care.
+    eprintln!("Shutting down comms");
     tokio_rt.shutdown_timeout(Duration::from_secs(10));
 
     Ok(fio_results)
