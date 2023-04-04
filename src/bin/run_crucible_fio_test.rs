@@ -289,7 +289,13 @@ pub fn run_crucible_fio_tests(
         Ok(fio_results)
     };
 
-    shutdown_downstairs(dsc_proccess, &dsc_exe)?;
+    // Just print the error because there's nothing we can do about it, and we
+    // already have results to return.
+    let shutdown_err = shutdown_downstairs(dsc_proccess, &dsc_exe);
+    if let Err(err) = shutdown_err {
+        eprintln!("Error shutting down dsc: \n{}", err.to_string())
+    }
+
     fio_results
 }
 
