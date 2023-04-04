@@ -107,7 +107,7 @@ pub fn main() -> Result<()> {
             id: job_id as u64,
             name: path,
             fio_job: job_contents,
-            fio_args: Vec::new(), // TODO
+            fio_args: Vec::new(), // TODO do we need any args?
         });
     }
 
@@ -126,7 +126,8 @@ pub fn main() -> Result<()> {
     };
 
     if cmd.output_format.contains("json") {
-        // TODO
+        // TODO parse individual result jsons and merge them is I think what
+        // we wanted to do here.
     } else {
         for result in fio_results {
             match result {
@@ -458,20 +459,6 @@ fn launch_fio_test_vm(
         iso_out.flush()?;
         iso_path
     };
-
-    // // TODO for now we're just making an image in the workdir, but later this
-    // // should be a crucible setup somehow.
-    // let test_disk_path = work_dir_path.join("disk.img");
-    // {
-    //     let mut img = File::create(&test_disk_path)?;
-    //     // 1MiB block
-    //     let buf = vec![0u8; 1024 * 1024];
-    //     // 1 gig disk image
-    //     for _ in 0..1024 {
-    //         img.write_all(&buf)?;
-    //     }
-    //     img.flush()?;
-    // }
 
     vm_config["main"]["name"] = value(vm_name);
     vm_config["main"]["cpus"] = value(cpu_cores as i64);
