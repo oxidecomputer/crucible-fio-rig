@@ -1,5 +1,5 @@
 i will make this readme more illuminating when im dying less. I'll also improve
-the project when I'm dying less. I'll be better soon (- artemis)
+the project when I'm dying less. which will be soon. (- artemis)
 
 this nix build isnt good and should be made better like the OKS one. but anyway, for now:
 
@@ -30,3 +30,6 @@ use it outside of the CI thing im building, i guess. code needs to be extracted
 out of `src/bin/run_crucible_fio_test.rs`, but it's mostly encapsulated anyway.
 you want the `run_fio_tests_on_rig` function, though maybe you want to abstract
 it to work on anything with `Read+Write` instead of specifically a UnixStream.
+
+
+btw for the main CI thing, we want this PR https://github.com/oxidecomputer/propolis/pull/344

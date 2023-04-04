@@ -623,16 +623,12 @@ fn run_fio_tests_on_rig(
     Ok(fio_results)
 }
 
-
 // struct Downstairs {
 //     port: u16,
 
-
 // }
 
-
 // struct DownstairsTrinity {
-
 
 // }
 
@@ -641,5 +637,5 @@ fn run_fio_tests_on_rig(
 // }
 
 // async fn shutdown_downstairs(dsc: &DownstairsTrinity) -> Result<()> {
-   
+
 // }

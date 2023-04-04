@@ -1,8 +1,9 @@
-use std::{fmt, error::Error};
+use std::{error::Error, fmt};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-pub const ALIGNMENT_SEQUENCE: &[u8] = "=== ALIGNTMENT SEQUENCE - ALL SYSTEMS: NOMINAL ===".as_bytes();
+pub const ALIGNMENT_SEQUENCE: &[u8] =
+    "=== ALIGNTMENT SEQUENCE - ALL SYSTEMS: NOMINAL ===".as_bytes();
 
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FioTestDefinition {
@@ -11,12 +12,12 @@ pub struct FioTestDefinition {
 
     /// Name of the test
     pub name: String,
-    
+
     /// Contents of a fio file for the test
     pub fio_job: String,
 
     /// Any extra args to be given directly to the fio command
-    pub fio_args: Vec<String>
+    pub fio_args: Vec<String>,
 }
 
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -46,7 +47,7 @@ pub struct FioTestErr {
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FioRigRequest {
     FioTest(FioTestDefinition),
-    Stop
+    Stop,
 }
 
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -54,12 +55,16 @@ pub enum FioRigResponse {
     FioTestResult(FioTestResult),
     ShuttingDown,
     FioTestErr(FioTestErr),
-    OtherErr(String)
+    OtherErr(String),
 }
 
 impl fmt::Display for FioTestErr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Error running FIO test {}-{}: {}", self.id, self.name, self.err)
+        write!(
+            f,
+            "Error running FIO test {}-{}: {}",
+            self.id, self.name, self.err
+        )
     }
 }
 impl Error for FioTestErr {}

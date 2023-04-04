@@ -1,15 +1,16 @@
 use anyhow::{bail, Result};
+use camino::Utf8Path;
 use crucible_fio_rig::fio_rig_protocol::{
     FioRigRequest, FioRigResponse, FioTestDefinition, FioTestErr, FioTestResult, ALIGNMENT_SEQUENCE,
 };
-use camino::Utf8Path;
 use futures::prelude::*;
 use std::{process::Stdio, time::Duration};
 use tempfile::tempdir;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
-    process::Command, time::sleep,
+    process::Command,
+    time::sleep,
 };
 use tokio_serde::formats::MessagePack;
 use tokio_serial::SerialStream;
@@ -38,7 +39,7 @@ async fn main_loop() -> Result<()> {
     // other end knows we're in charge of the serial port now.
     ser.write_all(ALIGNMENT_SEQUENCE).await?;
     ser.flush().await?;
-    
+
     let ser_delimited = tokio_util::codec::Framed::new(ser, LengthDelimitedCodec::new());
     let fio_rig_codec = MessagePack::<FioRigRequest, FioRigResponse>::default();
     let mut conn = tokio_serde::Framed::<_, FioRigRequest, FioRigResponse, _>::new(
@@ -59,8 +60,8 @@ async fn main_loop() -> Result<()> {
                 // Confirm that we're shutting down
                 eprintln!("Shutting down");
                 conn.send(FioRigResponse::ShuttingDown).await?;
-                break
-            },
+                break;
+            }
             FioRigRequest::FioTest(test_def) => {
                 eprintln!("Running test.");
                 let result = run_fio_test(&test_def).await;
@@ -95,9 +96,7 @@ async fn run_fio_test(test_def: &FioTestDefinition) -> Result<FioTestResult> {
     eprintln!("Writing jobfile.");
     {
         let mut job_file = File::create(&fio_job_path).await?;
-        job_file
-            .write_all(test_def.fio_job.as_bytes())
-            .await?;
+        job_file.write_all(test_def.fio_job.as_bytes()).await?;
         job_file.shutdown().await?;
     }
 
