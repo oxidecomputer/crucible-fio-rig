@@ -21,7 +21,7 @@ tempfile = "3.3.0"
 tokio = { version = "1.25.0", features = ["full"] }
 tokio-serde = { version = "0.8.0", features = ["messagepack"] }
 tokio-util = { version = "0.7.4", features = ["codec", "full"] }
-toml_edit = "0.18"  # this needs to match whatever cargo-edit is using.
+toml_edit = "0.19"  # this needs to match whatever cargo-edit is using.
 
 # tokio-serial doesn't build on illumos
 [target.'cfg(target_os = "linux")'.dependencies]

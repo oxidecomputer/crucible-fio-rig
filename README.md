@@ -12,7 +12,7 @@ To use this, `cargo build --release`, then run
 
 Requirements when running:
 
-- `cargo` on PATH.
+- `cargo` and `git` on PATH.
 - bhyve installed (check for `/dev/vmm`)
 - permission to create bhyve VMs.
 - 50 gigs of space in `/var`
