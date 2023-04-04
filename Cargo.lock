@@ -427,6 +427,7 @@ dependencies = [
  "camino",
  "cargo-edit",
  "futures",
+ "nix 0.26.2",
  "rand",
  "reqwest",
  "serde",

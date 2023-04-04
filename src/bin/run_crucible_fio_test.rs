@@ -17,7 +17,7 @@ use std::{
     str::FromStr,
     sync::mpsc,
     thread::{self, sleep},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tempfile;
 use tokio_serde::formats::MessagePack;
@@ -30,12 +30,15 @@ const BOOTROM_DOWNLOAD_URL: &str =
 const BOOTROM_HASH: &str = "fbeb0d100f8e8bbe12c558806c1ad0d8a88abf7a818eb04ef92498d61d31e2a4";
 const BOOTROM_FILENAME: &str = "OVMF_CODE.fd";
 
-const ISO_DOWNLOAD_URL: &str = "http://172.16.254.64:8099/f/fio-rig.iso";
+// TODO move this to oxide infrastructure
+const ISO_DOWNLOAD_URL: &str =
+    "https://pkg.artemis.sh/oxide/crucible_fio_rig/fio-rig-2023-04-03.iso";
 const ISO_HASH: &str = "2e0dd54003248e1761d34f5038919fac32541e9371010185349ac6919b90f8f6";
 const ISO_FILENAME: &str = "fio-rig.iso";
 
 /// bootrom and iso will be stored here.
 const CACHE_DIR: &str = "/var/cache/crucible-propolis-fio-test";
+const VAR_DIR: &str = "/var/crucible_fio_rig";
 
 #[derive(FromArgs, PartialEq, Debug)]
 /// Build propolis with a given commit hash of crucible, and run some fio
@@ -67,10 +70,10 @@ struct RunCrucibleFioTestCmd {
     propolis_commit: String,
 
     #[argh(option, default = "String::from(\"normal\")")]
-    ///fio output format, see fio help for more details. When normal or terse,
-    ///output will be formatted as the fio test path, the fio test
-    ///result/error, and then a few newlines. With json or json+, output will
-    ///be syntactically correct json.
+    /// fio output format, see fio help for more details. When normal or terse,
+    /// output will be formatted as the fio test path, the fio test
+    /// result/error, and then a few newlines. With json or json+, output will
+    /// be syntactically correct json.
     output_format: String,
 
     #[argh(option, default = "String::from(\"-\")")]
@@ -85,6 +88,7 @@ struct RunCrucibleFioTestCmd {
 }
 
 pub fn main() -> Result<()> {
+    // TODO ctrl_c handling
     // MISC TODO: run all the Command()s with stuff piped to slog or something
     let cmd: RunCrucibleFioTestCmd = argh::from_env();
 
@@ -163,11 +167,9 @@ pub fn run_crucible_fio_tests(
         bail!("/dev/vmm doesn't exist - is bhyve installed?");
     }
 
-    // create cache dir
-    std::fs::create_dir_all(CACHE_DIR)?;
-
     // work dir in tmp
-    let work_dir = tempfile::tempdir()?;
+    std::fs::create_dir_all(VAR_DIR)?;
+    let work_dir = tempfile::tempdir_in(VAR_DIR)?;
     let work_dir_path = Utf8Path::from_path(work_dir.path())
         .unwrap_or_else(|| panic!("tfw your filepath isn't valid UTF-8: {:?}", work_dir.path()));
 
@@ -185,6 +187,8 @@ pub fn run_crucible_fio_tests(
             .get_workspace_dependency_table_mut()
             .expect("Hey why doesn't propolis have workspace dependencies?");
 
+        // dep_name is the name of the dep in propolis' Cargo.toml, and subpath
+        // is the subdirectory that crate lives in within the crucible repo
         for (dep_name, subpath) in [
             ("crucible", "upstairs"),
             ("crucible-client-types", "crucible-client-types"),
@@ -203,7 +207,14 @@ pub fn run_crucible_fio_tests(
     // Build crucible downstairs
     let exit = Command::new("cargo")
         .current_dir(&crucible_dir)
-        .args(["build", "--release", "-p", "crucible-downstairs"])
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "crucible-downstairs",
+            "-p",
+            "dsc",
+        ])
         .spawn()?
         .wait()?;
     ensure!(exit.success());
@@ -211,12 +222,19 @@ pub fn run_crucible_fio_tests(
     // Build propolis
     let exit = Command::new("cargo")
         .current_dir(&propolis_dir)
-        .args(["build", "--release", "--bin=propolis-standalone"])
+        .args([
+            "build",
+            "--release",
+            "--bin=propolis-standalone",
+            "-F",
+            "crucible",
+        ])
         .spawn()?
         .wait()?;
     ensure!(exit.success());
 
     // Make sure the binaries we need actually exist
+    let dsc_exe = crucible_dir.join("target").join("release").join("dsc");
     let downstairs_exe = crucible_dir
         .join("target")
         .join("release")
@@ -225,44 +243,53 @@ pub fn run_crucible_fio_tests(
         .join("target")
         .join("release")
         .join("propolis-standalone");
+    ensure!(dsc_exe.exists());
     ensure!(downstairs_exe.exists());
     ensure!(propolis_exe.exists());
 
-    // TODO launch crucible
     let disk = DownstairsTrinity {
         ds_addrs: [
-            SocketAddr::from_str("127.0.0.1:8010").unwrap(),
-            SocketAddr::from_str("127.0.0.1:8020").unwrap(),
-            SocketAddr::from_str("127.0.0.1:8030").unwrap(),
+            SocketAddr::from_str("127.0.0.1:8810").unwrap(),
+            SocketAddr::from_str("127.0.0.1:8820").unwrap(),
+            SocketAddr::from_str("127.0.0.1:8830").unwrap(),
         ],
         block_size: 4096,
         blocks_per_extent: 32768,
         extent_count: 8 * 8,
     };
 
-    // Run a VM with propolis-standalone
-    let vm_name = generate_vm_name();
-    let (mut propolis_proc, vm_serial) =
-        launch_fio_test_vm(&vm_name, 2, 2048, &disk, &propolis_exe, &work_dir_path)?;
+    let dsc_proccess = launch_downstairs(&disk, &dsc_exe, &downstairs_exe, &work_dir_path)?;
 
-    // Run fio tests
-    let fio_results = run_fio_tests_on_rig(fio_jobs, vm_serial)?;
+    // We'll run the rest of the tests in their own Result block, so we can
+    // cleanly shut down dsc even when errors happen
+    let fio_results = {
+        // Run a VM with propolis-standalone
+        let vm_name = generate_vm_name();
+        let (mut propolis_proc, vm_serial) =
+            launch_fio_test_vm(&vm_name, 2, 2048, &disk, &propolis_exe, &work_dir_path)?;
 
-    // Close down propolis process
-    let _ = propolis_proc.kill();
-    // Wait up to 10 seconds, then move on with our life
-    for _ in 0..10 {
-        if let Ok(Some(_)) = propolis_proc.try_wait() {
-            break;
+        // Run fio tests
+        let fio_results = run_fio_tests_on_rig(fio_jobs, vm_serial)?;
+
+        // Close down propolis process
+        let _ = propolis_proc.kill();
+        // Wait up to 10 seconds, then move on with our life
+        for _ in 0..10 {
+            if let Ok(Some(_)) = propolis_proc.try_wait() {
+                break;
+            }
+            sleep(Duration::from_secs(1));
         }
-        sleep(Duration::from_secs(1));
-    }
 
-    // Clean up the VM resources. Ignore failure because ultimately we just
-    // want to bubble up the results, this is best effort.
-    let _ = destroy_bhyve_vm(&vm_name);
+        // Clean up the VM resources. Ignore failure because ultimately we just
+        // want to bubble up the results, this is best effort.
+        let _ = destroy_bhyve_vm(&vm_name);
 
-    Ok(fio_results)
+        Ok(fio_results)
+    };
+
+    shutdown_downstairs(dsc_proccess, &dsc_exe)?;
+    fio_results
 }
 
 fn clone_and_checkout<P: AsRef<Path>>(url: &str, gitref: &str, path: &P) -> Result<()> {
@@ -285,8 +312,9 @@ fn clone_and_checkout<P: AsRef<Path>>(url: &str, gitref: &str, path: &P) -> Resu
     Ok(())
 }
 
-/// Download a file to the path if there isn't already a file there. Make sure
-/// the file matches hash.
+/// Download a file to the path if there is no file there or the file currently
+/// there doesn't match the expected hash. Errors if the downloaded file does
+/// not match the expected hash
 fn download_if_needed(path: &Utf8Path, url: &str, expected_hash: blake3::Hash) -> Result<()> {
     let check_hash = || -> Result<()> {
         let mut file = File::open(path)?;
@@ -311,7 +339,10 @@ fn download_if_needed(path: &Utf8Path, url: &str, expected_hash: blake3::Hash) -
             // File is what we expect!
             Ok(()) => return Ok(()),
             // If the file exists but is the wrong hash, delete and redownload.
-            Err(_) => std::fs::remove_file(path)?,
+            Err(err) => {
+                eprintln!("Redownloading file at {}, because it doesn't match the expected hash. Here's the hash check message: {}", path.as_str(), err.to_string());
+                std::fs::remove_file(path)?;
+            }
         }
     }
 
@@ -323,6 +354,8 @@ fn download_if_needed(path: &Utf8Path, url: &str, expected_hash: blake3::Hash) -
         file.flush()?;
     }
 
+    // Do a final hash check to make sure what we just downloaded is what we
+    // expected
     check_hash()
 }
 
@@ -409,30 +442,36 @@ fn launch_fio_test_vm(
     driver = "pci-nvme"
     block_dev = "test_disk"
     pci-path = "0.5.0"
-
-    # TODO delete this later when we have it working
-    [dev.net0]
-    driver = "pci-virtio-viona"
-    vnic = "vnic_prop0"
-    pci-path = "0.6.0"
     "#;
     let mut vm_config = base_config_toml.parse::<Document>().unwrap();
     let bootrom_path = download_bootrom_if_needed()?;
-    let iso_path = download_fio_test_iso_if_needed()?;
 
-    // TODO for now we're just making an image in the workdir, but later this
-    // should be a crucible setup somehow.
-    let test_disk_path = work_dir_path.join("disk.img");
-    {
-        let mut img = File::create(&test_disk_path)?;
-        // 1MiB block
-        let buf = vec![0u8; 1024 * 1024];
-        // 1 gig disk image
-        for _ in 0..1024 {
-            img.write_all(&buf)?;
-        }
-        img.flush()?;
-    }
+    // copy cached iso to work_dir, because for some reason it gets modified
+    // during execution. That modification invalidates the cache! So we make
+    // a copy of the cached download.
+    let iso_path = {
+        let cached_iso_path = download_fio_test_iso_if_needed()?;
+        let iso_path = work_dir_path.join("fio-rig.iso");
+        let mut iso_in = File::open(cached_iso_path)?;
+        let mut iso_out = File::create(&iso_path)?;
+        std::io::copy(&mut iso_in, &mut iso_out)?;
+        iso_out.flush()?;
+        iso_path
+    };
+
+    // // TODO for now we're just making an image in the workdir, but later this
+    // // should be a crucible setup somehow.
+    // let test_disk_path = work_dir_path.join("disk.img");
+    // {
+    //     let mut img = File::create(&test_disk_path)?;
+    //     // 1MiB block
+    //     let buf = vec![0u8; 1024 * 1024];
+    //     // 1 gig disk image
+    //     for _ in 0..1024 {
+    //         img.write_all(&buf)?;
+    //     }
+    //     img.flush()?;
+    // }
 
     vm_config["main"]["name"] = value(vm_name);
     vm_config["main"]["cpus"] = value(cpu_cores as i64);
@@ -446,7 +485,15 @@ fn launch_fio_test_vm(
     vm_config["block_dev"]["test_disk"]["blocks_per_extent"] = value(disk.blocks_per_extent as i64);
     vm_config["block_dev"]["test_disk"]["extent_count"] = value(disk.extent_count as i64);
 
-    // YYY is to_string right here?
+    // for our testing purposes this can be anything as long as it's mostly
+    // monotonic
+    vm_config["block_dev"]["test_disk"]["generation"] = value(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64,
+    );
+
     let addrs: Array = disk.ds_addrs.iter().map(|addr| addr.to_string()).collect();
     vm_config["block_dev"]["test_disk"]["targets"] = value(addrs);
 
@@ -548,7 +595,10 @@ fn run_fio_tests_on_rig(
 
         // Until we've read the alignment sequence, read one byte at a time.
         while !scanning_buffer.iter().eq(ALIGNMENT_SEQUENCE.iter()) {
-            eprintln!("Current alignment buffer holds: {:?}", scanning_buffer);
+            // TODO I'm commenting this out for now to avoid polluting stderr in
+            // CI but we should turn it back on at log level DEBUG if/when we
+            // put slog in.
+            // eprintln!("Current alignment buffer holds: {:?}", scanning_buffer);
 
             let mut byte = [0u8; 1];
             match rig_serial.read(&mut byte) {
@@ -568,7 +618,7 @@ fn run_fio_tests_on_rig(
             let now = Instant::now();
             const TIMEOUT: u64 = 5;
             if now - start_time > Duration::from_secs(TIMEOUT * 60) {
-                bail!("VM ran for {} minutes but dind't print the alignment sequence. It's out of touch, and I'm out of time.", TIMEOUT);
+                bail!("VM ran for {} minutes but didn't print the alignment sequence. It's out of touch, and I'm out of time.", TIMEOUT);
             }
         }
 
@@ -577,7 +627,8 @@ fn run_fio_tests_on_rig(
     }
 
     // Run the actual tests. Honestly I don't even feel like using tokio here,
-    // but Framed is written around an async runtime
+    // but Framed is written around an async runtime. I might end up needing
+    // to make everything tokio for ctrl_c handling though later. lol.
     eprintln!("Launching communications with VM");
     let tokio_rt = tokio::runtime::Runtime::new()?;
 
@@ -651,13 +702,55 @@ struct DownstairsTrinity {
     extent_count: u32,
 }
 
-fn launch_downstairs(spec: &DownstairsTrinity) -> Result<()> {
-    // this should actually return the PID ideally
+/// Launch a set of downstairs using `dsc`. I don't think dsc lets us specify
+/// the port to addresses to use, so all the `ds_addrs` in the Downstairs
+/// specification will actually be ignored right now. Just make sure they're
+/// all 127.0.0.1 on ports 8810, 8820, and 8830
+fn launch_downstairs(
+    spec: &DownstairsTrinity,
+    dsc_exe: &Utf8Path,
+    downstairs_exe: &Utf8Path,
+    work_dir_path: &Utf8Path,
+) -> Result<Child> {
+    // TODO make this check if dsc is already running on the default ports.
+    // TODO also make it ensure the downstairs are running before returning.
+
+    let dsc = Command::new(dsc_exe)
+        .current_dir(work_dir_path)
+        .args([
+            "start",
+            "--create",
+            "--cleanup",
+            "--ds-bin",
+            downstairs_exe.as_str(),
+            "--output-dir",
+            work_dir_path.join("dsc-output").as_str(),
+            "--region-dir",
+            work_dir_path.join("dsc-region").as_str(),
+            "--block-size",
+            &spec.block_size.to_string(),
+            "--extent-size",
+            &spec.blocks_per_extent.to_string(),
+            "--extent-count",
+            &spec.extent_count.to_string(),
+        ])
+        .spawn()?;
+    Ok(dsc)
+}
+
+fn shutdown_downstairs(mut dsc_proc: Child, dsc_exe: &Utf8Path) -> Result<()> {
+    Command::new(dsc_exe)
+        .args(["cmd", "shutdown"])
+        .spawn()?
+        .wait()?;
+
+    // Wait up to 10 seconds, then move on with our life
+    for _ in 0..10 {
+        if let Ok(Some(_)) = dsc_proc.try_wait() {
+            break;
+        }
+        sleep(Duration::from_secs(1));
+    }
 
     Ok(())
 }
-
-// This should take the PID however that works
-// async fn shutdown_downstairs(dsc: &DownstairsTrinity) -> Result<()> {
-
-// }
