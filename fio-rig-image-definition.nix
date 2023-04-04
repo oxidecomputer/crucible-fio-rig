@@ -1,32 +1,40 @@
 { config, pkgs, lib, ... }:
 let
-  printerfacts = pkgs.callPackage ({ stdenv, lib, autoPatchelfHook }:
+  # Don't you dore do a getty, not even once buddy.  Realistically this is
+  # redundant because NixOS doesn't getty on ttyS0 unless the linux console is
+  # set to that, but just in case that changes, this is insurance.
+  systemd.services."getty@".enable = lib.mkForce false;
+  systemd.services."serial-getty@".enable = lib.mkForce false;
+  crucibleFioRig = pkgs.callPackage ({ stdenv, lib, autoPatchelfHook }:
     stdenv.mkDerivation rec {
-      pname = "printerfacts";
-      version = "HACK";
-      src = ./printerfacts;
+      pname = "crucibleFioRig";
+      version = "irrelevant";
+      src = ./target/release/fio_rig_server;
       unpackPhase = "true"; # disable unpacking by making it run `true`
       nativeBuildInputs = [ autoPatchelfHook ];
-      buildInputs = [ ];
+      buildInputs = [
+        pkgs.systemd # needed for libudev.so
+      ];
       installPhase = ''
-        install -m755 -D $src $out/bin/printerfacts
+        install -m755 -D $src $out/bin/fio_rig_server
       '';
-    }) {};
+    }) { };
 in {
   environment.systemPackages = [ pkgs.fio ];
-  systemd.services.dropkick = {
-    description = "Run the dropkick service";
+  systemd.services.fioRig = {
+    description = "Run the fio rig server component";
     wantedBy = [ "multi-user.target" ];
-    after = [ "network.target" ];
-    serviceConfig.ExecStart = "${printerfacts}/bin/printerfacts";
+    serviceConfig.ExecStart = "${crucibleFioRig}/bin/fio_rig_server";
   };
-  networking.firewall.allowedTCPPorts = [ 5000 ];
+  # TODO take these out when we're done debugging.
   services.openssh.enable = true;
   users.users.root.password = "hunter2";
   services.openssh.permitRootLogin = "yes";
-  boot.initrd.availableKernelModules =
-      [ "virtio_pci" "virtio_blk" "nvme" ];
+  boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" "nvme" ];
   boot.kernelParams = [
-    "console=ttyS0,1500000"
+    # "console=ttyS0,1500000"
+    # Use a virtual console, because we're using the real serial for our own
+    # comms
+    "console=ttyS1"
   ];
 }
