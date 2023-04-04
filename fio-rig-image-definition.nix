@@ -1,10 +1,10 @@
 { config, pkgs, lib, ... }:
 let
-  # Don't you dore do a getty, not even once buddy.  Realistically this is
+  # Don't you dare do a getty, not even once buddy.  Realistically this is
   # redundant because NixOS doesn't getty on ttyS0 unless the linux console is
   # set to that, but just in case that changes, this is insurance.
-  systemd.services."getty@".enable = lib.mkForce false;
   systemd.services."serial-getty@".enable = lib.mkForce false;
+  # systemd.services."getty@".enable = lib.mkForce false;
   crucibleFioRig = pkgs.callPackage ({ stdenv, lib, autoPatchelfHook }:
     stdenv.mkDerivation rec {
       pname = "crucibleFioRig";
