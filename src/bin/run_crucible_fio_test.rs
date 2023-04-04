@@ -84,6 +84,7 @@ struct RunCrucibleFioTestCmd {
 }
 
 pub fn main() -> Result<()> {
+    // MISC TODO: run all the Command()s with stuff piped to slog or something
     let cmd: RunCrucibleFioTestCmd = argh::from_env();
 
     if cmd.fio_jobs.is_empty() {
@@ -302,6 +303,7 @@ fn download_if_needed(path: &Utf8Path, url: &str, expected_hash: blake3::Hash) -
     }
 
     {
+        eprintln!("Downloading {} to {}", url, path);
         let mut download = reqwest::blocking::get(url)?;
         let mut file = File::create(path)?;
         download.copy_to(&mut file)?;
@@ -335,10 +337,12 @@ fn generate_vm_name() -> String {
 
     // This pool doesn't need to be big, it's just for fun. The number we throw
     // on the end is the main thing preventing colissions.
-    const DIVINES: [&str; 12] = [
-        "DISCOVERY",
+    const DIVINES: [&str; 14] = [
         "DETACHMENT",
+        "DISCOVERY",
+        "DISINTEREST",
         "EMPATHY",
+        "FORTITUDE",
         "GRACE",
         "INTEGRITY",
         "LIBERTY",
@@ -380,7 +384,8 @@ fn launch_fio_test_vm(
     type = "file"
 
     [block_dev.test_disk]
-    type = "file"
+    type = "crucible"
+    targets = []
 
     [dev.block0]
     driver = "pci-virtio-block"
@@ -479,7 +484,11 @@ fn launch_fio_test_vm(
 fn destroy_bhyve_vm(vm_name: &str) -> Result<()> {
     // Check that file exists before trying to destroy it. If it doesn't the
     // VM is already gone.
-    if !Utf8PathBuf::from_str("/dev/vmm").unwrap().join(vm_name).exists() {
+    if !Utf8PathBuf::from_str("/dev/vmm")
+        .unwrap()
+        .join(vm_name)
+        .exists()
+    {
         return Ok(());
     }
 
@@ -530,7 +539,7 @@ fn run_fio_tests_on_rig(
                 Ok(_) => unreachable!(),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => (), // read timeout, which is fine
                 Err(e) if e.kind() == ErrorKind::Interrupted => (), // interrupted, which is fine
-                Err(e) => bail!(e), // some unexpected error
+                Err(e) => bail!(e),                                // some unexpected error
             }
 
             // Do timeout check... I dunno, 5 minutes seems like a reasonable
@@ -550,6 +559,13 @@ fn run_fio_tests_on_rig(
     // but Framed is written around an async runtime
     eprintln!("Launching communications with VM");
     let tokio_rt = tokio::runtime::Runtime::new()?;
+
+    // This can technically hang forever, if some things go wrong in some very
+    // bad ways. like, the other end panicking kind of going wrong. Not
+    // ideal, admittedly. But we can't really know here what a reasonable
+    // timeout is because fio tests can take a long while to run, so we're
+    // leaving that up to whoever is running this command. /usr/bin/timeout
+    // is right there
     let fio_results = tokio_rt.block_on(async move {
         // Make the serial connection async
         let serial_io = tokio::net::UnixStream::from_std(rig_serial)?;
@@ -573,7 +589,7 @@ fn run_fio_tests_on_rig(
                 eprintln!("Sending a test: {}", test.name);
                 conn_write.send(FioRigRequest::FioTest(test)).await?;
             }
-            // conn_write.send(FioRigRequest::Stop).await?;
+            conn_write.send(FioRigRequest::Stop).await?;
             let result: Result<_> = Ok(());
             result
         });
@@ -606,3 +622,24 @@ fn run_fio_tests_on_rig(
 
     Ok(fio_results)
 }
+
+
+// struct Downstairs {
+//     port: u16,
+
+
+// }
+
+
+// struct DownstairsTrinity {
+
+
+// }
+
+// async fn launch_downstairs(workdir: &Utf8Path) -> Result<DownstairsTrinity> {
+
+// }
+
+// async fn shutdown_downstairs(dsc: &DownstairsTrinity) -> Result<()> {
+   
+// }
