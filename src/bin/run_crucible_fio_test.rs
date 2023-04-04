@@ -10,6 +10,7 @@ use std::{
     collections::VecDeque,
     fs::File,
     io::{BufRead, BufReader, ErrorKind, Read, Write},
+    net::SocketAddr,
     os::unix::net::UnixStream,
     path::Path,
     process::{Child, Command, Stdio},
@@ -21,7 +22,7 @@ use std::{
 use tempfile;
 use tokio_serde::formats::MessagePack;
 use tokio_util::codec::LengthDelimitedCodec;
-use toml_edit::{value, Document};
+use toml_edit::{value, Array, Document};
 
 // hashes here are blake3, generate with b3sum from `cargo install b3sum`
 const BOOTROM_DOWNLOAD_URL: &str =
@@ -227,10 +228,22 @@ pub fn run_crucible_fio_tests(
     ensure!(downstairs_exe.exists());
     ensure!(propolis_exe.exists());
 
+    // TODO launch crucible
+    let disk = DownstairsTrinity {
+        ds_addrs: [
+            SocketAddr::from_str("127.0.0.1:8010").unwrap(),
+            SocketAddr::from_str("127.0.0.1:8020").unwrap(),
+            SocketAddr::from_str("127.0.0.1:8030").unwrap(),
+        ],
+        block_size: 4096,
+        blocks_per_extent: 32768,
+        extent_count: 8 * 8,
+    };
+
     // Run a VM with propolis-standalone
     let vm_name = generate_vm_name();
     let (mut propolis_proc, vm_serial) =
-        launch_fio_test_vm(&vm_name, 2, 2048, &propolis_exe, &work_dir_path)?;
+        launch_fio_test_vm(&vm_name, 2, 2048, &disk, &propolis_exe, &work_dir_path)?;
 
     // Run fio tests
     let fio_results = run_fio_tests_on_rig(fio_jobs, vm_serial)?;
@@ -373,6 +386,7 @@ fn launch_fio_test_vm(
     vm_name: &str,
     cpu_cores: u8,
     memory: u32,
+    disk: &DownstairsTrinity,
     propolis_exe: &Utf8Path,
     work_dir_path: &Utf8Path,
 ) -> Result<(Child, UnixStream)> {
@@ -385,7 +399,6 @@ fn launch_fio_test_vm(
 
     [block_dev.test_disk]
     type = "crucible"
-    targets = []
 
     [dev.block0]
     driver = "pci-virtio-block"
@@ -427,7 +440,15 @@ fn launch_fio_test_vm(
     vm_config["main"]["memory"] = value(memory as i64);
 
     vm_config["block_dev"]["boot_iso"]["path"] = value(iso_path.as_str());
-    vm_config["block_dev"]["test_disk"]["path"] = value(test_disk_path.as_str());
+
+    // Specify the Downstairs definition
+    vm_config["block_dev"]["test_disk"]["block_size"] = value(disk.block_size as i64);
+    vm_config["block_dev"]["test_disk"]["blocks_per_extent"] = value(disk.blocks_per_extent as i64);
+    vm_config["block_dev"]["test_disk"]["extent_count"] = value(disk.extent_count as i64);
+
+    // YYY is to_string right here?
+    let addrs: Array = disk.ds_addrs.iter().map(|addr| addr.to_string()).collect();
+    vm_config["block_dev"]["test_disk"]["targets"] = value(addrs);
 
     let config_file_path = work_dir_path.join(format!("{}.propolis.toml", vm_name));
     {
@@ -623,19 +644,20 @@ fn run_fio_tests_on_rig(
     Ok(fio_results)
 }
 
-// struct Downstairs {
-//     port: u16,
+struct DownstairsTrinity {
+    ds_addrs: [SocketAddr; 3],
+    block_size: u32,
+    blocks_per_extent: u32,
+    extent_count: u32,
+}
 
-// }
+fn launch_downstairs(spec: &DownstairsTrinity) -> Result<()> {
+    // this should actually return the PID ideally
 
-// struct DownstairsTrinity {
+    Ok(())
+}
 
-// }
-
-// async fn launch_downstairs(workdir: &Utf8Path) -> Result<DownstairsTrinity> {
-
-// }
-
+// This should take the PID however that works
 // async fn shutdown_downstairs(dsc: &DownstairsTrinity) -> Result<()> {
 
 // }
