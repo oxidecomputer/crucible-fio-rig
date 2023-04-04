@@ -39,6 +39,10 @@ dev machine but less so in CI where system state gets wiped.
 
 There is not yet a way to specify the region parameters (block size, extents) with args.
 
+Also, the region is not filled with data before running the IO tests. We could
+do that; we could even make it an argument as to whether to do it. But know that
+it's not happening right now.
+
 ## Running the tests against a remote downstairs
 
 Currently there's no way to do this. Adding support shouldn't be trouble. We need
