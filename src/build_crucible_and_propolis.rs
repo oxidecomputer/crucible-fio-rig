@@ -1,10 +1,16 @@
-use std::{path::Path, process::Command};
+use std::{
+    os::fd::{AsRawFd, FromRawFd},
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use anyhow::{ensure, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_edit::LocalManifest;
+use serde::{Deserialize, Serialize};
 use toml_edit::value;
 
+#[derive(Serialize, Deserialize)]
 pub struct BuiltExecutables {
     pub downstairs_exe: Utf8PathBuf,
     pub dsc_exe: Utf8PathBuf,
@@ -59,6 +65,8 @@ pub fn build_crucible_and_propolis(
         manifest.write()?;
     }
 
+    let stderr_fd = std::io::stderr().as_raw_fd();
+
     // Build crucible downstairs
     let exit = Command::new("cargo")
         .current_dir(&crucible_dir)
@@ -70,6 +78,7 @@ pub fn build_crucible_and_propolis(
             "-p",
             "dsc",
         ])
+        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
         .spawn()?
         .wait()?;
     ensure!(exit.success());
@@ -84,6 +93,7 @@ pub fn build_crucible_and_propolis(
             "-F",
             "crucible",
         ])
+        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
         .spawn()?
         .wait()?;
     ensure!(exit.success());
@@ -110,10 +120,14 @@ pub fn build_crucible_and_propolis(
 }
 
 fn clone_and_checkout<P: AsRef<Path>>(url: &str, gitref: &str, path: &P) -> Result<()> {
+    // TODO eventually we probably want to just like, slog this?
+    let stderr_fd = std::io::stderr().as_raw_fd();
+
     let exit = Command::new("git")
         .arg("clone")
         .arg(url)
         .arg(path.as_ref().as_os_str())
+        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
         .spawn()?
         .wait()?;
     ensure!(exit.success());
@@ -122,6 +136,7 @@ fn clone_and_checkout<P: AsRef<Path>>(url: &str, gitref: &str, path: &P) -> Resu
         .current_dir(path)
         .arg("checkout")
         .arg(gitref)
+        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
         .spawn()?
         .wait()?;
     ensure!(exit.success());

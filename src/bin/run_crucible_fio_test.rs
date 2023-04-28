@@ -1,6 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// YYY-di probably rename this file to something shorted for the base command
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use argh::FromArgs;
@@ -47,6 +48,42 @@ const CACHE_DIR: &str = "/var/cache/crucible-propolis-fio-test";
 const VAR_DIR: &str = "/var/crucible_fio_rig";
 
 #[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "build-propolis-with-crucible")]
+/// Build propolis and crucible together. Prints out json containing the paths
+/// to the build crucible-downstairs, dsc, and propolis-standalone binaries.
+struct BuildPropolisWithCrucibleCmd {
+    #[argh(
+        option,
+        default = "String::from(\"https://github.com/oxidecomputer/crucible.git\")"
+    )]
+    /// repo url of crucible to use for upstairs/downstairs, defaults to
+    /// github oxidecomputer/crucible
+    crucible_url: String,
+
+    #[argh(option)]
+    /// commit hash, branch, or tag of crucible to use for upstairs/downstairs
+    crucible_commit: String,
+
+    #[argh(
+        option,
+        default = "String::from(\"https://github.com/oxidecomputer/propolis.git\")"
+    )]
+    /// repo url of propolis to use for upstairs/downstairs, defaults to
+    /// github oxidecomputer/propolis
+    propolis_url: String,
+
+    #[argh(option)]
+    /// commit hash, branch, or tag of propolis to check out
+    propolis_commit: String,
+
+    #[argh(option, default = "String::from(\".\")")]
+    /// directory within which to clone/build code. defaults to current
+    /// working directory.
+    work_dir: String,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "run-fio-test-in-vm")]
 /// Build propolis with a given commit hash of crucible, and run some fio
 /// tests in a VM on it. Output is printed to stdout or written to a
 /// specified output file
@@ -93,11 +130,50 @@ struct RunCrucibleFioTestCmd {
     fio_jobs: Vec<String>,
 }
 
+#[derive(FromArgs, PartialEq, Debug)]
+/// fio rig. see help for individual subcommands.
+struct FioRigCmd {
+    #[argh(subcommand)]
+    subcmd: FioRigSubCmd,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand)]
+enum FioRigSubCmd {
+    BuildPropolisWithCrucible(BuildPropolisWithCrucibleCmd),
+    RunCrucibleFioTest(RunCrucibleFioTestCmd),
+}
+
 pub fn main() -> Result<()> {
     // TODO ctrl_c handling
     // MISC TODO: run all the Command()s with stuff piped to slog or something
-    let cmd: RunCrucibleFioTestCmd = argh::from_env();
+    let cmd: FioRigCmd = argh::from_env();
 
+    match cmd.subcmd {
+        FioRigSubCmd::BuildPropolisWithCrucible(cmd) => build_propolis_with_crucible_main(cmd),
+        FioRigSubCmd::RunCrucibleFioTest(cmd) => run_crucible_fio_test_main(cmd),
+    }
+}
+
+fn build_propolis_with_crucible_main(cmd: BuildPropolisWithCrucibleCmd) -> Result<()> {
+    // YYY-di needs testing
+    let work_dir_path = Utf8PathBuf::from(cmd.work_dir);
+
+    let built_executables = build_crucible_and_propolis(
+        &cmd.crucible_url,
+        &cmd.crucible_commit,
+        &cmd.propolis_url,
+        &cmd.propolis_commit,
+        &work_dir_path,
+    )?;
+
+    serde_json::to_writer(std::io::stdout(), &built_executables)?;
+
+    Ok(())
+}
+
+fn run_crucible_fio_test_main(cmd: RunCrucibleFioTestCmd) -> Result<()> {
+    // YYY-di needs testing after refactor
     if cmd.fio_jobs.is_empty() {
         bail!("no fio jobs specified");
     }
@@ -117,11 +193,35 @@ pub fn main() -> Result<()> {
         });
     }
 
-    let fio_results = run_crucible_fio_tests(
+    // work dir in tmp
+    std::fs::create_dir_all(VAR_DIR)?;
+    let work_dir = tempfile::tempdir_in(VAR_DIR)?;
+    let work_dir_path = Utf8Path::from_path(work_dir.path())
+        .unwrap_or_else(|| panic!("tfw your filepath isn't valid UTF-8: {:?}", work_dir.path()));
+
+    // YYY::vi next up we want to probably pass BuiltExecutables in from main(),
+    // that way they can get specified as command line args. then we can
+    // optionally split the build/run or do them both together depending on
+    // usecase. Except we also want a way to pass in only the path to propolis
+    // if we're running against a remote downstairs- which we don't support yet,
+    // but should.
+    let BuiltExecutables {
+        dsc_exe,
+        downstairs_exe,
+        propolis_standalone_exe,
+    } = build_crucible_and_propolis(
         &cmd.crucible_url,
         &cmd.crucible_commit,
         &cmd.propolis_url,
         &cmd.propolis_commit,
+        work_dir_path,
+    )?;
+
+    let fio_results = run_crucible_fio_tests(
+        &dsc_exe,
+        &downstairs_exe,
+        &propolis_standalone_exe,
+        work_dir_path,
         fio_jobs,
     )?;
 
@@ -164,39 +264,15 @@ pub fn main() -> Result<()> {
 }
 
 pub fn run_crucible_fio_tests(
-    crucible_url: &str,
-    crucible_gitref: &str,
-    propolis_url: &str,
-    propolis_gitref: &str,
+    dsc_exe: &Utf8Path,
+    downstairs_exe: &Utf8Path,
+    propolis_standalone_exe: &Utf8Path,
+    work_dir_path: &Utf8Path,
     fio_jobs: Vec<FioTestDefinition>,
 ) -> Result<Vec<Result<FioTestResult, FioTestErr>>> {
     if !Utf8PathBuf::from_str("/dev/vmm").unwrap().try_exists()? {
         bail!("/dev/vmm doesn't exist - is bhyve installed?");
     }
-
-    // work dir in tmp
-    std::fs::create_dir_all(VAR_DIR)?;
-    let work_dir = tempfile::tempdir_in(VAR_DIR)?;
-    let work_dir_path = Utf8Path::from_path(work_dir.path())
-        .unwrap_or_else(|| panic!("tfw your filepath isn't valid UTF-8: {:?}", work_dir.path()));
-
-    // YYY::vi next up we want to probably pass BuiltExecutables in from main(),
-    // that way they can get specified as command line args. then we can
-    // optionally split the build/run or do them both together depending on
-    // usecase. Except we also want a way to pass in only the path to propolis
-    // if we're running against a remote downstairs- which we don't support yet,
-    // but should.
-    let BuiltExecutables {
-        dsc_exe,
-        downstairs_exe,
-        propolis_standalone_exe,
-    } = build_crucible_and_propolis(
-        crucible_url,
-        crucible_gitref,
-        propolis_url,
-        propolis_gitref,
-        work_dir_path,
-    )?;
 
     let disk = DownstairsTrinity {
         ds_addrs: [
