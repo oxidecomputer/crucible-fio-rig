@@ -1,5 +1,4 @@
 use std::{
-    os::fd::{AsRawFd, FromRawFd},
     path::Path,
     process::{Command, Stdio},
 };
@@ -65,10 +64,8 @@ pub fn build_crucible_and_propolis(
         manifest.write()?;
     }
 
-    let stderr_fd = std::io::stderr().as_raw_fd();
-
     // Build crucible downstairs
-    let exit = Command::new("cargo")
+    let mut cmd = Command::new("cargo")
         .current_dir(&crucible_dir)
         .args([
             "build",
@@ -78,13 +75,14 @@ pub fn build_crucible_and_propolis(
             "-p",
             "dsc",
         ])
-        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
-        .spawn()?
-        .wait()?;
+        .stdout(Stdio::piped())
+        .spawn()?;
+    std::io::copy(cmd.stdout.as_mut().unwrap(), &mut std::io::stderr())?;
+    let exit = cmd.wait()?;
     ensure!(exit.success());
 
     // Build propolis
-    let exit = Command::new("cargo")
+    let mut cmd = Command::new("cargo")
         .current_dir(&propolis_dir)
         .args([
             "build",
@@ -93,9 +91,10 @@ pub fn build_crucible_and_propolis(
             "-F",
             "crucible",
         ])
-        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
-        .spawn()?
-        .wait()?;
+        .stdout(Stdio::piped())
+        .spawn()?;
+    std::io::copy(cmd.stdout.as_mut().unwrap(), &mut std::io::stderr())?;
+    let exit = cmd.wait()?;
     ensure!(exit.success());
 
     // Make sure the binaries we need actually exist
@@ -121,25 +120,39 @@ pub fn build_crucible_and_propolis(
 
 fn clone_and_checkout<P: AsRef<Path>>(url: &str, gitref: &str, path: &P) -> Result<()> {
     // TODO eventually we probably want to just like, slog this?
-    let stderr_fd = std::io::stderr().as_raw_fd();
+    let path_str = path.as_ref().to_string_lossy();
 
-    let exit = Command::new("git")
+    eprintln!("Cloning {} to {}", url, path_str);
+    let mut cmd = Command::new("git")
         .arg("clone")
         .arg(url)
         .arg(path.as_ref().as_os_str())
-        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
-        .spawn()?
-        .wait()?;
-    ensure!(exit.success());
+        .stdout(Stdio::piped())
+        .spawn()?;
+    std::io::copy(cmd.stdout.as_mut().unwrap(), &mut std::io::stderr())?;
+    let exit = cmd.wait()?;
+    ensure!(
+        exit.success(),
+        "git clone of {} to {} failed",
+        url,
+        path_str,
+    );
 
-    let exit = Command::new("git")
+    eprintln!("Checking out ref {}", gitref);
+    let mut cmd = Command::new("git")
         .current_dir(path)
         .arg("checkout")
         .arg(gitref)
-        .stdout(unsafe { Stdio::from_raw_fd(stderr_fd) })
-        .spawn()?
-        .wait()?;
-    ensure!(exit.success());
+        .stdout(Stdio::piped())
+        .spawn()?;
+    std::io::copy(cmd.stdout.as_mut().unwrap(), &mut std::io::stderr())?;
+    let exit = cmd.wait()?;
+    ensure!(
+        exit.success(),
+        "git checkout of {} for {} failed",
+        gitref,
+        path.as_ref().to_string_lossy()
+    );
 
     Ok(())
 }

@@ -1,7 +1,6 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
-// YYY-di probably rename this file to something shorted for the base command
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use argh::FromArgs;
@@ -152,11 +151,11 @@ pub fn main() -> Result<()> {
     match cmd.subcmd {
         FioRigSubCmd::BuildPropolisWithCrucible(cmd) => build_propolis_with_crucible_main(cmd),
         FioRigSubCmd::RunCrucibleFioTest(cmd) => run_crucible_fio_test_main(cmd),
-    }
+    }?;
+    Ok(())
 }
 
 fn build_propolis_with_crucible_main(cmd: BuildPropolisWithCrucibleCmd) -> Result<()> {
-    // YYY-di needs testing
     let work_dir_path = Utf8PathBuf::from(cmd.work_dir);
 
     let built_executables = build_crucible_and_propolis(
