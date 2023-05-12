@@ -172,7 +172,6 @@ fn build_propolis_with_crucible_main(cmd: BuildPropolisWithCrucibleCmd) -> Resul
 }
 
 fn run_crucible_fio_test_main(cmd: RunCrucibleFioTestCmd) -> Result<()> {
-    // YYY-di needs testing after refactor
     if cmd.fio_jobs.is_empty() {
         bail!("no fio jobs specified");
     }
@@ -716,9 +715,28 @@ fn launch_downstairs(
     downstairs_exe: &Utf8Path,
     work_dir_path: &Utf8Path,
 ) -> Result<Child> {
-    // TODO make this check if dsc is already running on the default ports.
-    // TODO also make it ensure the downstairs are running before returning.
+    // For now we naiively assume that if dsc is running _at all_ then it's
+    // using the default ports. dsc is only used in testing and almost all our
+    // tools run it on the default ports, so it's a better assumption than not
+    // checking for anything at all.
+    //
+    // YYY-F\ It would be nice if we ran this check BEFORE all the compilation,
+    // but this is the easiest place to put it right now. maybe what we should
+    // do is make a like, check_preconditions kinda function that runs before
+    // anything else does. throw the check for vmm in there too
+    //
+    // TODO is there a better way to do this?
+    eprintln!("Checking if anyone else is running dsc...");
+    let pgrep_for_downstairs = Command::new("/usr/bin/pgrep").arg("dsc").output()?;
+    if pgrep_for_downstairs.status.success() {
+        bail!("another dsc is already running - we can't launch downstairs.");
+    }
+    eprintln!("Nope, we're good!");
 
+    // TODO also make it ensure the downstairs are running before returning.
+    // FYI: because this puts the region in work_dir_path, you really need to
+    // make sure there's plenty of space there. maybe later we'll split it up
+    // into separate paths, but its easier this way.
     let dsc = Command::new(dsc_exe)
         .current_dir(work_dir_path)
         .args([
